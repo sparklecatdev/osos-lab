@@ -84,6 +84,31 @@ off by default and the setting persists across reboots.
 
 The game SDK and [Doom port](doom/README.md) are unfinished.
 
+## Native FLAC
+
+Music can open original `.flac` files synced with the
+[iOpenPod patch](tools/iopenpod-native-flac.patch). The experimental decoder
+supports mono and stereo FLAC from 8 to 48 kHz, 4 to 24 bits per sample,
+and blocks up to 4,608 samples. It sends 16-bit PCM to the iPod's audio pipeline.
+The decoder and sync preparation have been tested on a computer. Playback on
+an iPod Classic still needs verification.
+
+With a RepriseOS build from this branch, launch the patched iOpenPod with native
+FLAC enabled:
+
+```sh
+git clone https://github.com/TheRealSavi/iOpenPod.git
+cd iOpenPod
+git switch --detach 5e48bd7b6ea0903a1ffc5f7a44c02bacac5496d0
+git apply /path/to/osos-lab/tools/iopenpod-native-flac.patch
+uv sync --locked
+REPRISEOS_NATIVE_FLAC=1 uv run -m iOpenPod
+```
+
+Sync Music with default stream selection and Rockbox metadata disabled.
+iOpenPod copies supported FLAC files byte for byte and uses its normal
+conversion settings for other FLAC files.
+
 ## Build
 
 Requires Python 3.11+, Git, Make, Perl, a host C compiler, and Rockbox's

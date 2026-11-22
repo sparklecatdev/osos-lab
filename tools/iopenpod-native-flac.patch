@@ -1,0 +1,207 @@
+diff --git a/src/iOpenPod/app/media/audio_formats.py b/src/iOpenPod/app/media/audio_formats.py
+index 4b04096..96ad2fe 100644
+--- a/src/iOpenPod/app/media/audio_formats.py
++++ b/src/iOpenPod/app/media/audio_formats.py
+@@ -10,6 +10,7 @@ def audio_file_details(encoding: AudioEncoding, kind: MediaKind) -> tuple[str, s
+         AudioEncoding.ALAC: ("m4a", "Apple Lossless audio file"),
+         AudioEncoding.WAV: ("wav", "WAV audio file"),
+         AudioEncoding.AIFF: ("aiff", "AIFF audio file"),
++        AudioEncoding.FLAC: ("flac", "FLAC audio file"),
+     }[encoding]
+     if kind is MediaKind.AUDIOBOOK and encoding in (
+         AudioEncoding.AAC,
+diff --git a/src/iOpenPod/app/media/music_paths.py b/src/iOpenPod/app/media/music_paths.py
+index de05edc..f010910 100644
+--- a/src/iOpenPod/app/media/music_paths.py
++++ b/src/iOpenPod/app/media/music_paths.py
+@@ -17,7 +17,9 @@ _NAMES_PER_DIRECTORY = 26**4
+ _TRACK_PATH = re.compile(
+     r"ipod_control/music/f([0-9]{2,})/([a-z]{4})(?:\.[^/]+)?", re.ASCII
+ )
+-_EXTENSIONS = frozenset({"mp3", "m4a", "m4b", "m4v", "mp4", "wav", "aif", "aiff"})
++_EXTENSIONS = frozenset(
++    {"mp3", "m4a", "m4b", "m4v", "mp4", "wav", "aif", "aiff", "flac"}
++)
+
+
+ class MusicPathAllocator:
+diff --git a/src/iOpenPod/app/media/transcoding.py b/src/iOpenPod/app/media/transcoding.py
+index 373e215..0d6f19e 100644
+--- a/src/iOpenPod/app/media/transcoding.py
++++ b/src/iOpenPod/app/media/transcoding.py
+@@ -2,6 +2,7 @@
+
+ from __future__ import annotations
+
++import os
+ import re
+ from contextlib import contextmanager
+ from dataclasses import dataclass, replace
+@@ -10,6 +11,7 @@ from fractions import Fraction
+ from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+
+ import mutagen
++from mutagen.flac import FLAC
+
+ from iOpenPod.app.export_tagging import ExportMediaTagger
+ from iOpenPod.app.media.captions import verify_captions
+@@ -1026,14 +1028,30 @@ class MediaTranscoder:
+                     MediaKind.PODCAST,
+                     MediaKind.AUDIOBOOK,
+                 )
+-            plan = resolve_transcode(
+-                observed,
+-                profile,
+-                settings,
+-                tools.encoders,
+-                spoken_word=spoken_word,
+-                stream_selection=stream_selection,
+-            )
++            plan = None
++            if (
++                os.environ.get("REPRISEOS_NATIVE_FLAC") == "1"
++                and profile.family == "iPod Classic"
++                and not spoken_word
++                and not rockbox_metadata
++                and stream_selection is None
++                and "flac" in observed.containers
++                and len(observed.audio_streams) == 1
++                and not observed.video_streams
++            ):
++                with LocalHostFile.observe(captured.snapshot).open_read(
++                    checkpoint=checkpoint
++                ) as stream:
++                    plan = _repriseos_flac_plan(stream)
++            if plan is None:
++                plan = resolve_transcode(
++                    observed,
++                    profile,
++                    settings,
++                    tools.encoders,
++                    spoken_word=spoken_word,
++                    stream_selection=stream_selection,
++                )
+             selected = (
+                 replace(observed, streams=stream_selection.streams)
+                 if stream_selection is not None
+@@ -1460,6 +1478,7 @@ class MediaTranscoder:
+                 # the longest stream, so a video copy could hide missing audio.
+                 if (
+                     not plan.copies_audio
++                    or plan.encoding is AudioEncoding.FLAC
+                     or result.video_streams
+                     or not is_decode_failure(error)
+                 ):
+@@ -1526,6 +1545,32 @@ class MediaTranscoder:
+             )
+
+
++def _repriseos_flac_plan(stream: BinaryIO) -> TranscodePlan | None:
++    if stream.read(8) not in (b"fLaC\x00\x00\x00\x22", b"fLaC\x80\x00\x00\x22"):
++        return None
++    stream.seek(0)
++    try:
++        info = FLAC(stream).info
++    except mutagen.MutagenError:
++        return None
++    if (
++        not 8000 <= info.sample_rate <= 48000
++        or not 1 <= info.channels <= 2
++        or not 4 <= info.bits_per_sample <= 24
++        or not 16 <= info.min_blocksize <= info.max_blocksize <= 4608
++        or not 0 < info.total_samples * info.channels * 2 <= 0x7FFFFFFF - 44
++    ):
++        return None
++    return TranscodePlan(
++        AudioEncoding.FLAC,
++        ".flac",
++        (),
++        info.sample_rate,
++        info.channels,
++        copies_audio=True,
++    )
++
++
+ def _input_arguments(
+     source: HostPath,
+     threads: int,
+diff --git a/src/iPodDB/library/media.py b/src/iPodDB/library/media.py
+index 8f629b8..046179d 100644
+--- a/src/iPodDB/library/media.py
++++ b/src/iPodDB/library/media.py
+@@ -11,6 +11,7 @@ class AudioEncoding(StrEnum):
+     ALAC = "alac"
+     WAV = "wav"
+     AIFF = "aiff"
++    FLAC = "flac"
+
+
+ def prepared_audio(
+@@ -34,6 +35,7 @@ def prepared_audio(
+         AudioEncoding.ALAC: (b"M4A ", 0, 0xFFFF, 0),
+         AudioEncoding.WAV: (b"WAV ", 0, 0, 0),
+         AudioEncoding.AIFF: (b"AIFF", 0, 0, 0),
++        AudioEncoding.FLAC: (b"WAV ", 0, 0, 0),  # RepriseOS routes FLAC through WAV.
+     }[encoding]
+     if audiobook and encoding is AudioEncoding.AAC:
+         code = b"M4B "
+diff --git a/tests/iOpenPod/app/test_transcoding.py b/tests/iOpenPod/app/test_transcoding.py
+index 6e446c9..e2c2448 100644
+--- a/tests/iOpenPod/app/test_transcoding.py
++++ b/tests/iOpenPod/app/test_transcoding.py
+@@ -19,6 +19,8 @@ from device_registry import DEFAULT_DEVICE_REGISTRY
+ from device_registry.data.catalog import DEFAULT_CATALOG
+ from iOpenPod.app.artwork_policy import rockbox_artwork
+ from iOpenPod.app.media import MediaInspectionError, MediaInspector, MediaTag
++from iOpenPod.app.media.audio_formats import audio_file_details
++from iOpenPod.app.media.music_paths import MusicPathAllocator
+ from iOpenPod.app.media.progress import MediaPreparationPhase, MediaPreparationProgress
+ from iOpenPod.app.media.stream_selection import MediaStreamSelection
+ from iOpenPod.app.media.transcoding import (
+@@ -34,6 +36,8 @@ from iOpenPod.app.media.transcoding import (
+     resolve_transcode,
+ )
+ from iPodDB.library import ArtworkPixels, AudioEncoding, MediaKind, Track, TrackMetadata
++from iPodDB.library.media import prepared_audio
++from iPodDB.library.writing import FileDependency
+ from storage import HostPath, capture_host_file
+ from storage.host_tools import find_host_executable
+ from storage.media_processing import MediaToolError, MediaWorkspace
+@@ -162,6 +166,37 @@ def test_compatible_copy_preserves_exact_bytes_and_cleans_temporary_files(
+     assert Path(original).exists()
+
+
++def test_repriseos_sync_preserves_flac_bytes(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    ffmpeg = shutil.which("ffmpeg")
++    if ffmpeg is None or shutil.which("ffprobe") is None:
++        pytest.skip("Actual media preparation needs FFmpeg and FFprobe")
++    classic = next(p for p in DEFAULT_CATALOG.profiles if p.family == "iPod Classic")
++    path = tmp_path / "tone.flac"
++    subprocess.run(
++        [ffmpeg, "-v", "error", "-f", "lavfi", "-i", "sine=duration=0.1", str(path)],
++        check=True,
++    )
++    monkeypatch.setenv("REPRISEOS_NATIVE_FLAC", "1")
++    with MediaTranscoder().prepare(
++        HostPath(path), classic, TranscodeSettings(), checkpoint=lambda: None
++    ) as result:
++        assert result.encoding is AudioEncoding.FLAC
++        assert not result.was_transcoded
++        assert Path(result.source).read_bytes() == path.read_bytes()
++        extension, _ = audio_file_details(result.encoding, MediaKind.MUSIC)
++        location = MusicPathAllocator(1).allocate(extension)
++        assert location.endswith(".flac")
++        fingerprint = result.inspection.fingerprint
++        media = prepared_audio(
++            0,
++            FileDependency(location, fingerprint.size, fingerprint.sha256),
++            result.encoding,
++        )
++        assert media.filetype == int.from_bytes(b"WAV ", "big")
++
++
+ def test_high_resolution_surround_lossless_becomes_verified_stereo_alac(
+     tmp_path: Path, profile: DeviceProfile, transcoder: MediaTranscoder
+ ) -> None:

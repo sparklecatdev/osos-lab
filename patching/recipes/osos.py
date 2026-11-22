@@ -42,6 +42,10 @@ def payload_units(source, generated_ui):
         for path in sorted(source.iterdir())
         if path.suffix in (".c", ".S") and not path.name.endswith(".lds.S")
     ]
+    units.extend(
+        (str(path.relative_to(source)), [])
+        for path in sorted((source / "audio").glob("*.c"))
+    )
     return [*units, (str(generated_ui), [])]
 
 
