@@ -25,8 +25,50 @@ index de05edc..f010910 100644
 
 
  class MusicPathAllocator:
+diff --git a/src/iOpenPod/app/media/tags.py b/src/iOpenPod/app/media/tags.py
+index f613183..c46ddfb 100644
+--- a/src/iOpenPod/app/media/tags.py
++++ b/src/iOpenPod/app/media/tags.py
+@@ -338,6 +338,18 @@ def _release_date(text: str) -> int | None:
+         return None
+
+
++def replaygain_db(raw_gain: str) -> float | None:
++    if re.fullmatch(r"[+-]?\d+(?:\.\d+)?\s*(?:dB)?", raw_gain, re.IGNORECASE):
++        value = float(re.sub(r"\s*dB$", "", raw_gain, flags=re.IGNORECASE))
++        if (
++            math.isfinite(value)
++            and -100 <= value <= 100
++            and 0 < round(1000 * 10 ** (-value / 10)) <= 0xFFFFFFFF
++        ):
++            return value
++    return None
++
++
+ def apply_tag_values(
+     track: Track,
+     values: tuple[MediaTag, ...],
+@@ -381,15 +393,9 @@ def apply_tag_values(
+     tags["year"] = tags.get("date", "")[:4]
+     gain = metadata.normalization_gain_db
+     if not (fill_only and gain is not None):
+-        raw_gain = tags.get("normalization_gain_db", "")
+-        if re.fullmatch(r"[+-]?\d+(?:\.\d+)?\s*(?:dB)?", raw_gain, re.IGNORECASE):
+-            value = float(re.sub(r"\s*dB$", "", raw_gain, flags=re.IGNORECASE))
+-            if (
+-                math.isfinite(value)
+-                and -100 <= value <= 100
+-                and 0 < round(1000 * 10 ** (-value / 10)) <= 0xFFFFFFFF
+-            ):
+-                gain = value
++        tagged_gain = replaygain_db(tags.get("normalization_gain_db", ""))
++        if tagged_gain is not None:
++            gain = tagged_gain
+     if gain is None:
+         sound_check = tags.get("sound_check", "").split()
+         if len(sound_check) == 10 and all(
 diff --git a/src/iOpenPod/app/media/transcoding.py b/src/iOpenPod/app/media/transcoding.py
-index 373e215..0d6f19e 100644
+index 373e215..c222501 100644
 --- a/src/iOpenPod/app/media/transcoding.py
 +++ b/src/iOpenPod/app/media/transcoding.py
 @@ -2,6 +2,7 @@
@@ -45,7 +87,46 @@ index 373e215..0d6f19e 100644
 
  from iOpenPod.app.export_tagging import ExportMediaTagger
  from iOpenPod.app.media.captions import verify_captions
-@@ -1026,14 +1028,30 @@ class MediaTranscoder:
+@@ -41,7 +43,11 @@ from iOpenPod.app.media.subtitles.preparation import (
+     prepare_subtitles,
+     verify_subtitles,
+ )
+-from iOpenPod.app.media.tags import apply_tag_values, inspection_tag_values
++from iOpenPod.app.media.tags import (
++    apply_tag_values,
++    inspection_tag_values,
++    replaygain_db,
++)
+ from iPodDB.library import AudioEncoding, MediaKind
+ from storage.host_input import LocalHostFile
+ from storage.media_processing import (
+@@ -58,7 +64,7 @@ from storage.media_processing import (
+ )
+
+ if TYPE_CHECKING:
+-    from collections.abc import Callable, Generator
++    from collections.abc import Callable, Generator, Mapping
+     from typing import BinaryIO
+
+     from device_registry import DeviceProfile
+@@ -164,6 +170,8 @@ class TranscodePlan:
+     video_muxer: Literal["ipod", "mov"] = "ipod"
+     subtitle_conversions: tuple[SubtitleConversion, ...] = ()
+     copies_audio: bool = False
++    native_flac_samples: int = 0
++    replaygain_db: float | None = None
+
+     @property
+     def requires_transcode(self) -> bool:
+@@ -182,6 +190,7 @@ class PreparedTranscode:
+     variable_bitrate: bool | None = None
+     original_inspection: MediaInspection | None = None
+     metadata: Track | None = None
++    native_flac_samples: int = 0
+
+
+ _LOSSLESS = frozenset(
+@@ -1026,14 +1035,30 @@ class MediaTranscoder:
                      MediaKind.PODCAST,
                      MediaKind.AUDIOBOOK,
                  )
@@ -84,7 +165,19 @@ index 373e215..0d6f19e 100644
              selected = (
                  replace(observed, streams=stream_selection.streams)
                  if stream_selection is not None
-@@ -1460,6 +1478,7 @@ class MediaTranscoder:
+@@ -1390,7 +1415,10 @@ class MediaTranscoder:
+                     "media.caption_payload_changed",
+                     "The prepared video did not preserve its selected caption data. This item was not written to the iPod.",
+                 )
+-            measure_sound_check = compute_sound_check and bool(result.audio_streams)
++            gain = plan.replaygain_db
++            measure_sound_check = (
++                compute_sound_check and gain is None and bool(result.audio_streams)
++            )
+             verification_message = (
+                 "Verifying prepared media and measuring Sound Check"
+                 if measure_sound_check
+@@ -1460,6 +1488,7 @@ class MediaTranscoder:
                  # the longest stream, so a video copy could hide missing audio.
                  if (
                      not plan.copies_audio
@@ -92,7 +185,19 @@ index 373e215..0d6f19e 100644
                      or result.video_streams
                      or not is_decode_failure(error)
                  ):
-@@ -1526,6 +1545,32 @@ class MediaTranscoder:
+@@ -1481,7 +1510,6 @@ class MediaTranscoder:
+                         SOURCE_DAMAGED_MESSAGE,
+                     ) from error
+                 decode_warnings = damage_warnings(verification_output.stderr)
+-            gain: float | None = None
+             warnings = (
+                 *plan.warnings,
+                 *subtitle_warnings,
+@@ -1523,9 +1551,49 @@ class MediaTranscoder:
+                 else False,
+                 observed,
+                 metadata,
++                native_flac_samples=plan.native_flac_samples,
              )
 
 
@@ -101,9 +206,10 @@ index 373e215..0d6f19e 100644
 +        return None
 +    stream.seek(0)
 +    try:
-+        info = FLAC(stream).info
++        flac = cast("Callable[[BinaryIO], FLAC]", FLAC)(stream)
 +    except mutagen.MutagenError:
 +        return None
++    info = flac.info
 +    if (
 +        not 8000 <= info.sample_rate <= 48000
 +        or not 1 <= info.channels <= 2
@@ -112,6 +218,16 @@ index 373e215..0d6f19e 100644
 +        or not 0 < info.total_samples * info.channels * 2 <= 0x7FFFFFFF - 44
 +    ):
 +        return None
++    tags = cast("Mapping[str, list[str]]", flac.tags or {})
++    gain = next(
++        (
++            value
++            for key in ("replaygain_track_gain", "replaygain_album_gain")
++            for raw in tags.get(key, [])
++            if (value := replaygain_db(raw.strip())) is not None
++        ),
++        None,
++    )
 +    return TranscodePlan(
 +        AudioEncoding.FLAC,
 +        ".flac",
@@ -119,12 +235,67 @@ index 373e215..0d6f19e 100644
 +        info.sample_rate,
 +        info.channels,
 +        copies_audio=True,
++        native_flac_samples=info.total_samples,
++        replaygain_db=gain,
 +    )
 +
 +
  def _input_arguments(
      source: HostPath,
      threads: int,
+diff --git a/src/iOpenPod/app/sync_execution.py b/src/iOpenPod/app/sync_execution.py
+index 150ee4e..2cb748c 100644
+--- a/src/iOpenPod/app/sync_execution.py
++++ b/src/iOpenPod/app/sync_execution.py
+@@ -2800,6 +2800,7 @@ def _song(
+         raise ValueError("Prepared media has no verified duration or sample rate.")
+     if audio is None and motion is None:
+         raise ValueError("Prepared media has no verified audio or motion-video stream.")
++    native_flac = output.encoding is AudioEncoding.FLAC
+     track = replace(
+         host,
+         track_id=0,
+@@ -2826,13 +2827,23 @@ def _song(
+                 if output.variable_bitrate is None
+                 else output.variable_bitrate
+             ),
+-            pregap=0 if output.was_transcoded else host.metadata.pregap,
+-            sample_count=0 if output.was_transcoded else host.metadata.sample_count,
+-            postgap=0 if output.was_transcoded else host.metadata.postgap,
+-            gapless=False if output.was_transcoded else host.metadata.gapless,
++            pregap=0 if native_flac or output.was_transcoded else host.metadata.pregap,
++            sample_count=(
++                output.native_flac_samples
++                if native_flac or output.was_transcoded
++                else host.metadata.sample_count
++            ),
++            postgap=0
++            if native_flac or output.was_transcoded
++            else host.metadata.postgap,
++            gapless=(
++                bool(output.native_flac_samples)
++                if native_flac or output.was_transcoded
++                else host.metadata.gapless
++            ),
+             normalization_gain_db=(
+                 output.normalization_gain_db
+-                if request.options.compute_sound_check
++                if (native_flac or request.options.compute_sound_check)
+                 and output.normalization_gain_db is not None
+                 else host.metadata.normalization_gain_db
+             ),
+@@ -3023,7 +3034,10 @@ def _draft(
+                     has_lyrics=old.metadata.has_lyrics,
+                     normalization_gain_db=(
+                         song.track.metadata.normalization_gain_db
+-                        if request.options.compute_sound_check
++                        if (
++                            request.options.compute_sound_check
++                            or song.source.media.file.relative_path.endswith(".flac")
++                        )
+                         and song.track.metadata.normalization_gain_db is not None
+                         else old.metadata.normalization_gain_db
+                     ),
 diff --git a/src/iPodDB/library/media.py b/src/iPodDB/library/media.py
 index 8f629b8..046179d 100644
 --- a/src/iPodDB/library/media.py
@@ -145,6 +316,122 @@ index 8f629b8..046179d 100644
      }[encoding]
      if audiobook and encoding is AudioEncoding.AAC:
          code = b"M4B "
+diff --git a/tests/iOpenPod/app/test_sync_execution.py b/tests/iOpenPod/app/test_sync_execution.py
+index 71f09ea..ed2421e 100644
+--- a/tests/iOpenPod/app/test_sync_execution.py
++++ b/tests/iOpenPod/app/test_sync_execution.py
+@@ -11,6 +11,7 @@ import io
+ import json
+ import re
+ import shutil
++import subprocess
+ import wave
+ import weakref
+ from collections.abc import Callable
+@@ -3249,6 +3250,87 @@ def test_disabling_playlist_reconciliation_still_cleans_explicit_track_removal(
+         device.coordinator.close()
+
+
++def test_repriseos_sync_writes_flac_playback_metadata(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    ffmpeg = shutil.which("ffmpeg")
++    if ffmpeg is None or shutil.which("ffprobe") is None:
++        pytest.skip("Actual media preparation needs FFmpeg and FFprobe")
++    monkeypatch.setenv("REPRISEOS_NATIVE_FLAC", "1")
++    source_directory = tmp_path / "source"
++    source_directory.mkdir()
++    tracks = {
++        "First": (4411, "-7.25 dB", -7.25),
++        "Second": (8821, "invalid", -4.6),
++    }
++    for title, (samples, track_gain, _) in tracks.items():
++        subprocess.run(
++            [
++                ffmpeg,
++                "-v",
++                "error",
++                "-f",
++                "lavfi",
++                "-i",
++                "sine=duration=0.3",
++                "-af",
++                f"atrim=end_sample={samples}",
++                "-metadata",
++                f"title={title}",
++                "-metadata",
++                f"REPLAYGAIN_TRACK_GAIN={track_gain}",
++                "-metadata",
++                "REPLAYGAIN_ALBUM_GAIN=-4.6 dB",
++                "-metadata",
++                "ITUNESGAPLESS=1",
++                str(source_directory / f"{title}.flac"),
++            ],
++            check=True,
++        )
++    scanner = HostMediaScanner()
++    pending = scanner.scan(
++        (create_host_media_folder(source_directory),), checkpoint=lambda: None
++    )
++    host = scanner.complete(pending, frozenset(), checkpoint=lambda: None)
++    device = build_device(tmp_path)
++    try:
++        request = _request(device, host)
++        request = replace(
++            request,
++            plan=select_sync_plan(
++                request.plan,
++                selected_host_paths=frozenset(
++                    host_path_identity(str(source.path)) for source in host.sources
++                ),
++                selected_ipod_removals=frozenset(),
++            ),
++        )
++        result = SyncExecutor(device.coordinator).execute(
++            request, lambda _: None, Event()
++        )
++        assert result.status is SyncExecutionStatus.SUCCESS, result.issues
++        database = device.root / "iPod_Control/iTunes/iTunesDB"
++        synced = {
++            track.title: track.metadata
++            for track in IPodLibrary.parse(database.read_bytes()).snapshot.tracks
++            if track.title in tracks
++        }
++        assert synced.keys() == tracks.keys()
++        for title, (samples, _, gain) in tracks.items():
++            meta = synced[title]
++            assert meta.sample_count == samples
++            assert meta.pregap == meta.postgap == 0
++            assert meta.gapless and meta.gapless_album
++            assert meta.normalization_gain_db == pytest.approx(gain, abs=0.01)
++            path = device.root / meta.location
++            assert path.suffix == ".flac"
++            assert (
++                path.read_bytes() == (source_directory / f"{title}.flac").read_bytes()
++            )
++    finally:
++        device.coordinator.close()
++
++
+ @pytest.mark.parametrize("encoding", list(AudioEncoding))
+ @pytest.mark.parametrize(
+     "kind", [MediaType.AUDIO, MediaType.AUDIOBOOK, MediaType.PODCAST]
+@@ -3300,6 +3382,7 @@ def test_sync_audio_destination_matches_classification_and_encoding(
+                 AudioEncoding.MP3: "mp3",
+                 AudioEncoding.WAV: "wav",
+                 AudioEncoding.AIFF: "aiff",
++                AudioEncoding.FLAC: "flac",
+             }[encoding]
+         )
+         assert song.track.metadata.location.endswith("." + extension)
+@@ -3313,6 +3396,7 @@ def test_sync_audio_destination_matches_classification_and_encoding(
+                 AudioEncoding.MP3: b"MP3 ",
+                 AudioEncoding.WAV: b"WAV ",
+                 AudioEncoding.AIFF: b"AIFF",
++                AudioEncoding.FLAC: b"WAV ",
+             }[encoding]
+         )
+         assert song.source.media.filetype == int.from_bytes(code, "big")
 diff --git a/tests/iOpenPod/app/test_transcoding.py b/tests/iOpenPod/app/test_transcoding.py
 index 6e446c9..e2c2448 100644
 --- a/tests/iOpenPod/app/test_transcoding.py

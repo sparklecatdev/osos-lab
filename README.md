@@ -109,6 +109,13 @@ Sync Music with default stream selection and Rockbox metadata disabled.
 iOpenPod copies supported FLAC files byte for byte and uses its normal
 conversion settings for other FLAC files.
 
+Music uses embedded FLAC seek tables when available and otherwise seeks by
+decoding frames. iOpenPod records the exact FLAC sample count with zero
+encoder delay and padding for gapless transitions. Enable Sound Check on the
+iPod to use ReplayGain from synced files. iOpenPod uses the track gain when
+present and falls back to the album gain. Reimport previously synced FLAC
+files to refresh their playback metadata.
+
 ## Build
 
 Requires Python 3.11+, Git, Make, Perl, a host C compiler, and Rockbox's

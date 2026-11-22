@@ -13,9 +13,31 @@ static int read_source(void *source, void *buffer, unsigned bytes)
     return ferror(file) ? -1 : (int)length;
 }
 
-static int rewind_source(void *source)
+static int seek_source(void *source, uint32_t offset)
 {
-    return fseek(source, 0, SEEK_SET);
+    return fseek(source, offset, SEEK_SET);
+}
+
+static int seek_indexed(void *source, uint32_t offset)
+{
+    fprintf(stderr, "%lu\n", (unsigned long)offset);
+    return seek_source(source, offset);
+}
+
+static int read_indexed_wave(void)
+{
+    static struct flac_wave wave;
+    unsigned char bytes[97];
+    if (flac_wave_open(&wave, read_source, seek_indexed, stdin))
+        return 1;
+    uint32_t positions[] = {wave.size - 471, wave.size / 3 + 7, wave.size - 471};
+    for (unsigned i = 0; i < sizeof(positions) / sizeof(*positions); i++) {
+        if (flac_wave_seek(&wave, positions[i], 0) ||
+            flac_wave_read(&wave, bytes, sizeof(bytes)) != sizeof(bytes) ||
+            fwrite(bytes, 1, sizeof(bytes), stdout) != sizeof(bytes))
+            return 1;
+    }
+    return 0;
 }
 
 static int read_wave(void)
@@ -24,7 +46,7 @@ static int read_wave(void)
     unsigned char bytes[511];
     if (!flac_wave_path("F00/song.FlAc") || flac_wave_path(".f") ||
         flac_wave_path("song.flac.wav") || flac_wave_path(NULL) ||
-        flac_wave_open(&wave, read_source, rewind_source, stdin))
+        flac_wave_open(&wave, read_source, seek_source, stdin))
         return 1;
 
     int count;
@@ -50,6 +72,8 @@ int main(int argc, char **argv)
 {
     if (argc == 2 && !strcmp(argv[1], "wave"))
         return read_wave();
+    if (argc == 2 && !strcmp(argv[1], "indexed"))
+        return read_indexed_wave();
 
     static struct flac_decoder decoder;
     static int16_t pcm[FLAC_MAX_BLOCK * 2];

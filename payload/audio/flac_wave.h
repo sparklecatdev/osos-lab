@@ -7,7 +7,7 @@
 
 struct flac_wave {
     struct flac_decoder decoder;
-    int (*rewind)(void *source);
+    int (*seek)(void *source, uint32_t offset);
     uint32_t position;
     uint32_t size;
     uint32_t frame_start;
@@ -18,7 +18,7 @@ struct flac_wave {
 
 int flac_wave_path(const char *path);
 int flac_wave_open(struct flac_wave *wave, int (*read)(void *, void *, unsigned),
-                   int (*rewind)(void *), void *source);
+                   int (*seek)(void *, uint32_t), void *source);
 int flac_wave_seek(struct flac_wave *wave, int64_t offset, unsigned whence);
 int flac_wave_read(struct flac_wave *wave, void *buffer, unsigned bytes);
 

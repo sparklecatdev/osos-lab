@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
+import json
 import math
 import random
 import shutil
@@ -160,6 +161,70 @@ class FlacDecodeTests(unittest.TestCase):
                 result.stdout,
                 expected + expected[43:46] + expected[9046:9057] + expected[-7:],
             )
+
+    @unittest.skipUnless(shutil.which("ffprobe"), "ffprobe required")
+    def test_indexed_seeks_and_fallback(self):
+        samples = [(i * 733 % 65536) - 32768 for i in range(12791)]
+        encoded = bytearray(self.encode(samples, 44100, 1, 16))
+        count = ((encoded[21] & 0xF0) << 32) | len(samples)
+        encoded[21:26] = count.to_bytes(5, "big")
+        probe = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "packet=pts,duration,pos",
+                "-of",
+                "json",
+                "-i",
+                "pipe:0",
+            ],
+            input=encoded,
+            capture_output=True,
+            check=True,
+        )
+        packets = json.loads(probe.stdout)["packets"]
+        first_frame = int(packets[0]["pos"])
+        pcm = struct.pack(f"<{len(samples)}h", *samples)
+        end = len(pcm) + 44
+        positions = (end - 471, end // 3 + 7, end - 471)
+        expected = b"".join(pcm[pos - 44 : pos - 44 + 97] for pos in positions)
+
+        for offset_error in (0, 1):
+            with self.subTest(offset_error=offset_error):
+                table = b"".join(
+                    struct.pack(
+                        ">QQH",
+                        int(packet["pts"]),
+                        int(packet["pos"]) - first_frame + offset_error,
+                        int(packet["duration"]),
+                    )
+                    for packet in packets[::2]
+                ) + struct.pack(">QQH", (1 << 64) - 1, 0, 0)
+                block = b"\x03" + len(table).to_bytes(3, "big") + table
+                with tempfile.TemporaryFile() as source:
+                    source.write(encoded[:42] + block + encoded[42:])
+                    source.seek(0)
+                    result = subprocess.run(
+                        [self.decoder, "indexed"], stdin=source, capture_output=True
+                    )
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, expected)
+                audio_start = first_frame + len(block)
+                audio_seeks = [
+                    offset
+                    for offset in map(int, result.stderr.splitlines())
+                    if offset >= audio_start
+                ]
+                last = int(packets[12]["pos"]) + len(block) + offset_error
+                earlier = int(packets[4]["pos"]) + len(block)
+                self.assertEqual(
+                    audio_seeks,
+                    [last, audio_start, audio_start]
+                    if offset_error
+                    else [last, earlier, last],
+                )
 
 
 if __name__ == "__main__":

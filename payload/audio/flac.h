@@ -14,7 +14,12 @@ struct flac_decoder {
     uint64_t samples_read;
     uint32_t rate;
     uint32_t frame_number;
+    uint32_t input_end;
+    uint32_t audio_start;
+    uint32_t seek_table;
+    uint32_t seek_points;
     uint16_t max_block;
+    uint16_t seek_count;
     uint8_t channels;
     uint8_t bits;
 
@@ -38,5 +43,11 @@ int flac_open(struct flac_decoder *decoder,
  * The 16-bit output truncates source precision above 16 bits.
  */
 int flac_decode(struct flac_decoder *decoder, int16_t *output);
+
+/* Position before sample, optionally decoding an indexed frame into output.
+ * Returns the decoded frame size, 0 if still between frames, or -1 on I/O error.
+ */
+int flac_seek(struct flac_decoder *decoder, int (*seek)(void *, uint32_t),
+              uint32_t sample, int16_t *output);
 
 #endif

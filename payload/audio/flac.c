@@ -6,7 +6,8 @@ static int input_byte(struct flac_decoder *d)
 {
     if (d->offset == d->length) {
         int length = d->read(d->source, d->buffer, sizeof(d->buffer));
-        if (length < 0 || (unsigned)length > sizeof(d->buffer)) {
+        if (length < 0 || (unsigned)length > sizeof(d->buffer) ||
+            (unsigned)length > UINT32_MAX - d->input_end) {
             d->error = 1;
             return -1;
         }
@@ -14,6 +15,7 @@ static int input_byte(struct flac_decoder *d)
             return -1;
         d->length = length;
         d->offset = 0;
+        d->input_end += length;
     }
     return d->buffer[d->offset++];
 }
@@ -28,6 +30,11 @@ static int metadata_byte(struct flac_decoder *d)
     return byte;
 }
 
+static uint32_t input_position(const struct flac_decoder *d)
+{
+    return d->input_end - d->length + d->offset;
+}
+
 int flac_open(struct flac_decoder *d, int (*read)(void *, void *, unsigned),
               void *source)
 {
@@ -40,6 +47,9 @@ int flac_open(struct flac_decoder *d, int (*read)(void *, void *, unsigned),
     d->source = source;
     d->offset = 0;
     d->length = 0;
+    d->input_end = 0;
+    d->seek_points = 0;
+    d->seek_count = 0;
     d->bits_left = 0;
     d->samples_read = 0;
     d->frame_number = 0;
@@ -79,9 +89,14 @@ int flac_open(struct flac_decoder *d, int (*read)(void *, void *, unsigned),
         length = 0;
         for (unsigned i = 0; i < 3; i++)
             length = (length << 8) | metadata_byte(d);
+        if ((type & 127) == 3 && length % 18 == 0) {
+            d->seek_table = input_position(d);
+            d->seek_points = length / 18;
+        }
         while (length-- && !d->error)
             metadata_byte(d);
     }
+    d->audio_start = input_position(d);
     return d->error ? -1 : 0;
 
 invalid:
@@ -355,6 +370,8 @@ int flac_decode(struct flac_decoder *d, int16_t *output)
     bits(d, 8);
     if (d->error || d->crc8 || !count || count > d->max_block || rate != d->rate ||
         number != ((sync & 1) ? d->samples_read : d->frame_number) ||
+        (d->seek_count && (count != d->seek_count ||
+                          (!(sync & 1) && (uint32_t)d->samples_read % d->max_block))) ||
         (d->total_samples && d->samples_read + count > d->total_samples))
         goto invalid;
 
@@ -390,9 +407,82 @@ int flac_decode(struct flac_decoder *d, int16_t *output)
     }
     d->samples_read += count;
     d->frame_number++;
+    d->seek_count = 0;
     return count;
 
 invalid:
     d->error = 1;
     return -1;
+}
+
+static int move_input(struct flac_decoder *d, int (*seek)(void *, uint32_t),
+                      uint32_t position)
+{
+    d->offset = 0;
+    d->length = 0;
+    d->bits_left = 0;
+    d->input_end = position;
+    d->error = seek(d->source, position) != 0;
+    return d->error;
+}
+
+static uint64_t metadata_number(struct flac_decoder *d, unsigned bytes)
+{
+    uint64_t value = 0;
+    while (bytes--)
+        value = (value << 8) | metadata_byte(d);
+    return value;
+}
+
+int flac_seek(struct flac_decoder *d, int (*seek)(void *, uint32_t),
+              uint32_t sample, int16_t *output)
+{
+    int backwards = sample < d->samples_read;
+    if (!backwards && (!d->seek_points || d->error))
+        return d->error ? -1 : 0;
+
+    uint32_t next = input_position(d);
+    uint32_t best_sample = 0;
+    uint32_t best_offset = 0;
+    unsigned best_count = 0;
+    unsigned lo = 0, hi = d->seek_points;
+    while (lo < hi) {
+        unsigned mid = lo + (hi - lo) / 2;
+        if (move_input(d, seek, d->seek_table + 18 * mid))
+            break;
+        uint64_t point = metadata_number(d, 8);
+        if (point > sample) {
+            hi = mid;
+            continue;
+        }
+        lo = mid + 1;
+        uint64_t offset = metadata_number(d, 8);
+        unsigned count = metadata_number(d, 2);
+        if (!d->error && (backwards || point > d->samples_read) &&
+            offset <= UINT32_MAX - d->audio_start &&
+            count && count <= d->max_block && point + count <= d->total_samples) {
+            best_sample = point;
+            best_offset = offset;
+            best_count = count;
+        }
+    }
+
+    if (best_count) {
+        if (!move_input(d, seek, d->audio_start + best_offset)) {
+            d->samples_read = best_sample;
+            d->frame_number = best_sample / d->max_block;
+            d->seek_count = best_count;
+            int count = flac_decode(d, output);
+            if (count > 0)
+                return count;
+        }
+        d->seek_points = 0;
+    } else if (!backwards) {
+        return move_input(d, seek, next) ? -1 : 0;
+    }
+
+    d->samples_read = 0;
+    d->frame_number = 0;
+    d->seek_count = 0;
+    return move_input(d, seek, d->audio_start) ? -1 : 0;
 }

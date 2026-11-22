@@ -46,10 +46,10 @@ static int read_source(void *source, void *buffer, unsigned bytes)
     return stream->ops->read(stream, buffer, bytes, READ_RAW);
 }
 
-static int rewind_source(void *source)
+static int seek_source(void *source, uint32_t offset)
 {
     struct audio_stream *stream = source;
-    return stream->ops->seek(stream, 0, 0);
+    return stream->ops->seek(stream, offset, 0);
 }
 
 static int close_flac(struct audio_stream *stream)
@@ -120,12 +120,12 @@ PATCH_ARM int cfw_parse_wave_or_flac(struct wave_reader *reader)
 {
     if (flac_wave_path(reader->path)) {
         struct audio_stream *source = reader->stream;
-        if (!source || rewind_source(source))
+        if (!source || seek_source(source, 0))
             return AUDIO_ERROR;
         struct flac_stream *flac = osos_import_alloc(sizeof(*flac));
         if (!flac)
             return AUDIO_ERROR;
-        if (flac_wave_open(&flac->wave, read_source, rewind_source, source)) {
+        if (flac_wave_open(&flac->wave, read_source, seek_source, source)) {
             osos_import_free(flac);
             return AUDIO_ERROR;
         }

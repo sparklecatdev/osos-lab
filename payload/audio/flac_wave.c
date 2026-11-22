@@ -25,7 +25,7 @@ static void put_le(uint8_t *out, uint32_t value, unsigned size)
 }
 
 int flac_wave_open(struct flac_wave *wave, int (*read)(void *, void *, unsigned),
-                   int (*rewind)(void *), void *source)
+                   int (*seek)(void *, uint32_t), void *source)
 {
     static const uint8_t header[44] = {
         'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'A', 'V', 'E',
@@ -33,7 +33,7 @@ int flac_wave_open(struct flac_wave *wave, int (*read)(void *, void *, unsigned)
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 0,
         'd', 'a', 't', 'a', 0, 0, 0, 0,
     };
-    if (!wave || !rewind || flac_open(&wave->decoder, read, source))
+    if (!wave || !seek || flac_open(&wave->decoder, read, source))
         return -1;
 
     uint32_t stride = 2 * wave->decoder.channels;
@@ -48,7 +48,7 @@ int flac_wave_open(struct flac_wave *wave, int (*read)(void *, void *, unsigned)
     put_le(wave->header + 28, wave->decoder.rate * stride, 4);
     put_le(wave->header + 32, stride, 2);
     put_le(wave->header + 40, bytes, 4);
-    wave->rewind = rewind;
+    wave->seek = seek;
     wave->size = sizeof(header) + bytes;
     wave->position = 0;
     wave->frame_start = sizeof(header);
@@ -73,20 +73,24 @@ int flac_wave_seek(struct flac_wave *wave, int64_t offset, unsigned whence)
 
 static int decode_until(struct flac_wave *wave)
 {
-    if (wave->position < wave->frame_start) {
-        uint32_t position = wave->position;
-        struct flac_decoder *decoder = &wave->decoder;
-        if (wave->rewind(decoder->source) ||
-            flac_wave_open(wave, decoder->read, wave->rewind, decoder->source))
+    struct flac_decoder *decoder = &wave->decoder;
+    uint32_t stride = 2 * decoder->channels;
+    if (wave->position < wave->frame_start ||
+        (decoder->seek_points && wave->position >= wave->frame_end &&
+         wave->position - wave->frame_end >= decoder->max_block * stride)) {
+        uint32_t sample = (wave->position - sizeof(wave->header)) / stride;
+        int count = flac_seek(decoder, wave->seek, sample, wave->pcm);
+        if (count < 0)
             return -1;
-        wave->position = position;
+        wave->frame_end = sizeof(wave->header) + (uint32_t)decoder->samples_read * stride;
+        wave->frame_start = wave->frame_end - count * stride;
     }
     while (wave->position >= wave->frame_end) {
-        int count = flac_decode(&wave->decoder, wave->pcm);
+        int count = flac_decode(decoder, wave->pcm);
         if (count <= 0)
             return -1;
         wave->frame_start = wave->frame_end;
-        wave->frame_end += count * 2 * wave->decoder.channels;
+        wave->frame_end += count * stride;
     }
     return 0;
 }
