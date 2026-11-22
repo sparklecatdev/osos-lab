@@ -84,6 +84,21 @@ off by default and the setting persists across reboots.
 
 The game SDK and [Doom port](doom/README.md) are unfinished.
 
+## Play music from a FLAC library
+
+Convert FLAC to Apple Lossless (`.m4a`) before syncing to RepriseOS. The import
+tool requires Python 3.11+ and `ffmpeg` and `ffprobe` on your `PATH`.
+
+```sh
+python3.11 tools/import_flac.py /path/to/flac-library --out /path/to/alac-library
+```
+
+The tool accepts a single file or a directory. It preserves the audio samples
+for 16-bit mono or stereo FLAC at 44.1 or 48 kHz, carries over compatible tags
+and the first embedded cover, and leaves existing files untouched. Import the
+resulting `.m4a` files into Music or iTunes, then sync them to the iPod. To play
+`.flac` files directly, [boot Rockbox](https://repriseos.com/faq/) if it is installed.
+
 ## Build
 
 Requires Python 3.11+, Git, Make, Perl, a host C compiler, and Rockbox's
