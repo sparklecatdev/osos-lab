@@ -9,6 +9,7 @@
 #include "up_next_ui.h"
 #include "play_next.h"
 #include "up_next.h"
+#include "lyrics.h"
 #include "media_browser.h"
 #include "ui_visibility.h"
 
@@ -262,6 +263,8 @@ PATCH_ARM int cfw_up_next_np_event(void *model, void *event)
     uint32_t code = FIELD(uint32_t, event, 4);
     if (code == 0x80009 || code == 0x8000a || code == 0x8000f || code == 0x80010)
         queue_changed = 1;
+    if (code == 0x80009 || code == 0x8000a)
+        cfw_lrc_track_changed(model);
     int result = cfw_np_event_original(model, event);
     if (!inside) { /* a refresh may raise player events itself */
         inside = 1;

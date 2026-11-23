@@ -72,6 +72,7 @@ class PayloadTests(unittest.TestCase):
                 "song_actions",
                 "play_next",
                 "up_next",
+                "lyrics_lrc",
                 "file_info",
                 "playback_log",
                 "media_menus",

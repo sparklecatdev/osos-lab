@@ -370,6 +370,11 @@ int cfw_np_event_original(void *m, void *e)
     return 7;
 }
 
+void cfw_lrc_track_changed(void *m)
+{
+    (void)m;
+}
+
 static void setup(int shuffled, int reversed)
 {
     clear_songs(browser.data);
