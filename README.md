@@ -33,11 +33,32 @@ and [host tools](host/README.md).
 
 ## Install
 
-Download RepriseOS Installer from [the website](https://repriseos.com/download/)
-or [GitHub releases](https://github.com/lgreitis/repriseos-installer/releases).
-Use **`iPod_38.2.0.5.ipsw`** for every supported Classic. The installed Apple
-firmware can be older. Follow the app's DFU instructions; it downloads the
-RepriseOS package and builds a companion using that iPod's identity.
+1. Back up the iPod's music, library database and playlists. Confirm it boots
+   Apple OS and plays a track. Use a supported FAT32 iPod Classic, a charged
+   battery, and a reliable USB cable plugged directly into the computer.
+2. Download [RepriseOS Installer v0.2.8](https://github.com/lgreitis/repriseos-installer/releases/tag/v0.2.8)
+   and [Apple's `iPod_38.2.0.5.ipsw`](https://secure-appldnld.apple.com/iPod/SBML/osx/bundles/041-8552.20121203.Bile3/iPod_38.2.0.5.ipsw).
+   For experimental native FLAC, use `classic/repriseos.zip` inside the **firmware** artifact
+   from a successful [native-flac build](https://github.com/sparklecatdev/osos-lab/actions/workflows/firmware.yml?query=branch%3Anative-flac).
+3. In **Install/Update RepriseOS**, choose the Apple IPSW, open **Use a local
+   package**, and choose the intact FLAC ZIP. Follow the app's DFU guide and
+   continue only after its device checks pass. Stop on a failed check or an
+   **Install anyway (experimental)** prompt.
+4. Keep the iPod connected and the computer awake until the iPod reboots.
+   Check Apple OS and RepriseOS, then test regular audio and a few FLAC tracks
+   before syncing the library.
+
+The installer updates disk files only when the installed bootloader matches
+the package. A first install or a different bootloader requires a bootloader
+write. The installer verifies a fresh NOR and SysCfg backup before that write.
+If you need a disk-only update and the installed bootloader is uncertain,
+stop before starting the install.
+
+If installation stops with an error, use **Save debug ZIP** and keep the
+installer's backup folder. If RepriseOS fails to boot, hold **Menu** at startup
+to try Apple OS. Keep a known-good RepriseOS ZIP available to reinstall through
+**Use a local package**. An Apple restore erases the iPod. See the
+[recovery FAQ](https://repriseos.com/faq/).
 
 ## Features
 
